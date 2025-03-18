@@ -14,6 +14,7 @@
 use std::io::Read;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Local, TimeZone};
 use chrono_tz::{OffsetName, Tz};
 use iana_time_zone::get_timezone;
@@ -1224,6 +1225,49 @@ bf_declare!(db_disk_size, db_disk_size);
    the corresponding server option settings (see section Server Options Set in the Database)
    accordingly. If the programmer is not a wizard, then E_PERM is raised.
 */
+/// Function: str encode_base64(str text)
+/// 
+/// Encodes the given string using Base64 encoding.
+/// Returns the Base64-encoded string.
+fn bf_encode_base64(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    if bf_args.args.len() != 1 {
+        return Err(BfErr::Code(E_ARGS));
+    }
+
+    let Variant::Str(text) = bf_args.args[0].variant() else {
+        return Err(BfErr::Code(E_TYPE));
+    };
+
+    let encoded = general_purpose::STANDARD.encode(text.as_str().as_bytes());
+    Ok(Ret(v_string(encoded)))
+}
+bf_declare!(encode_base64, bf_encode_base64);
+
+/// Function: str decode_base64(str encoded_text)
+/// 
+/// Decodes the given Base64-encoded string.
+/// Returns the decoded string. If the input is not valid Base64, E_INVARG is raised.
+fn bf_decode_base64(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    if bf_args.args.len() != 1 {
+        return Err(BfErr::Code(E_ARGS));
+    }
+
+    let Variant::Str(encoded_text) = bf_args.args[0].variant() else {
+        return Err(BfErr::Code(E_TYPE));
+    };
+
+    let decoded = match general_purpose::STANDARD.decode(encoded_text.as_str().as_bytes()) {
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return Err(BfErr::Code(E_INVARG)),
+        },
+        Err(_) => return Err(BfErr::Code(E_INVARG)),
+    };
+
+    Ok(Ret(v_string(decoded)))
+}
+bf_declare!(decode_base64, bf_decode_base64);
+
 fn load_server_options(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if !bf_args.args.is_empty() {
         return Err(BfErr::Code(E_ARGS));
@@ -1278,6 +1322,8 @@ pub(crate) fn register_bf_server(builtins: &mut [Box<dyn BuiltinFunction>]) {
     builtins[offset_for_builtin("memory_usage")] = Box::new(BfMemoryUsage {});
     builtins[offset_for_builtin("db_disk_size")] = Box::new(BfDbDiskSize {});
     builtins[offset_for_builtin("load_server_options")] = Box::new(BfLoadServerOptions {});
+    builtins[offset_for_builtin("encode_base64")] = Box::new(BfEncodeBase64 {});
+    builtins[offset_for_builtin("decode_base64")] = Box::new(BfDecodeBase64 {});
 
     builtins[offset_for_builtin("present")] = Box::new(BfPresent {});
 }
