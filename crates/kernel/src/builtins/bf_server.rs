@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{DateTime, Local, TimeZone};
+use moor_var::Associative;
 use chrono_tz::{OffsetName, Tz};
 use iana_time_zone::get_timezone;
 use tracing::{error, info, warn};
@@ -32,7 +33,7 @@ use moor_common::tasks::TaskId;
 use moor_common::tasks::{NarrativeEvent, Presentation};
 use moor_compiler::compile;
 use moor_compiler::{ArgCount, ArgType, BUILTINS, Builtin, offset_for_builtin};
-use moor_var::Error::{E_ARGS, E_INVARG, E_INVIND, E_PERM, E_TYPE};
+use moor_var::Error::{E_ARGS, E_INVARG, E_INVIND, E_PERM, E_RANGE, E_TYPE};
 use moor_var::Sequence;
 use moor_var::VarType::TYPE_STR;
 use moor_var::Variant;
@@ -1268,6 +1269,149 @@ fn bf_decode_base64(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 }
 bf_declare!(decode_base64, bf_decode_base64);
 
+/// Function: list slice(list|map alist [, int|list|str index [, any default_value]])
+/// 
+/// Returns a list containing elements from `alist` based on the `index` parameter:
+/// 
+/// - If `alist` is a list and `index` is an integer, returns the `index`-th element of `alist`.
+///   If `index` is omitted, defaults to 1.
+/// 
+/// - If `alist` is a list and `index` is a list of integers, returns a list containing 
+///   the elements of `alist` at the positions specified in `index`.
+/// 
+/// - If `alist` is a list of maps and `index` is a string, returns a list containing
+///   the values associated with key `index` from each map in `alist`.
+///   If `default_value` is provided, it will be used for any maps that don't contain the key.
+/// 
+/// Examples:
+///   slice({"a", "b", "c"}, 2) => "b"
+///   slice({"a", "b", "c"}, {1, 3}) => {"a", "c"}
+///   slice({#[["x", 1], ["y", 2]], #[["x", 3], ["z", 4]]}, "x") => {1, 3}
+///   slice({#[["x", 1]], #[["z", 4]]}, "x", 0) => {1, 0}
+fn bf_slice(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
+    if bf_args.args.is_empty() || bf_args.args.len() > 3 {
+        return Err(BfErr::Code(E_ARGS));
+    }
+
+    // Get the collection (list or map)
+    let collection = &bf_args.args[0];
+    
+    // Default index is 1 if not provided
+    let index = if bf_args.args.len() >= 2 {
+        &bf_args.args[1]
+    } else {
+        // Default to index 1 (MOO is 1-indexed)
+        &v_int(1)
+    };
+    
+    // Optional default value for map lookups
+    let default_value = if bf_args.args.len() == 3 {
+        Some(&bf_args.args[2])
+    } else {
+        None
+    };
+
+    match collection.variant() {
+        Variant::List(list) => {
+            match index.variant() {
+                // Case 1: List + Integer index
+                Variant::Int(idx) => {
+                    let idx = *idx as usize;
+                    
+                    // Check if this is a list of lists
+                    let first_item = list.index(0).map_err(BfErr::Code)?;
+                    if let Variant::List(_) = first_item.variant() {
+                        // This is a list of lists, extract the idx-th element from each sublist
+                        let mut result = Vec::with_capacity(list.len());
+                        
+                        for item in list.iter() {
+                            if let Variant::List(sublist) = item.variant() {
+                                if idx < 1 || idx > sublist.len() {
+                                    return Err(BfErr::Code(E_RANGE));
+                                }
+                                // MOO is 1-indexed, so subtract 1
+                                result.push(sublist.index(idx - 1).map_err(BfErr::Code)?);
+                            } else {
+                                return Err(BfErr::Code(E_TYPE));
+                            }
+                        }
+                        
+                        Ok(Ret(v_list(&result)))
+                    } else {
+                        // This is a regular list, return the idx-th element
+                        if idx < 1 || idx > list.len() {
+                            return Err(BfErr::Code(E_RANGE));
+                        }
+                        // MOO is 1-indexed, so subtract 1
+                        Ok(Ret(list.index(idx - 1).map_err(BfErr::Code)?))
+                    }
+                },
+                
+                // Case 2: List + List of indices
+                Variant::List(indices) => {
+                    let mut result = Vec::with_capacity(indices.len());
+                    
+                    for idx_var in indices.iter() {
+                        match idx_var.variant() {
+                            Variant::Int(idx) => {
+                                let idx = *idx as usize;
+                                if idx < 1 || idx > list.len() {
+                                    return Err(BfErr::Code(E_RANGE));
+                                }
+                                // MOO is 1-indexed, so subtract 1
+                                result.push(list.index(idx - 1).map_err(BfErr::Code)?);
+                            },
+                            _ => return Err(BfErr::Code(E_TYPE)),
+                        }
+                    }
+                    
+                    Ok(Ret(v_list(&result)))
+                },
+                
+                // Case 3: List of maps + String key
+                Variant::Str(key) => {
+                    let mut result = Vec::with_capacity(list.len());
+                    
+                    for item in list.iter() {
+                        match item.variant() {
+                            Variant::Map(map) => {
+                                // Create a key Var from the string
+                                let key_var = v_str(key.as_str());
+                                
+                                // Try to get the value for this key
+                                match map.index(&key_var) {
+                                    Ok(value) => result.push(value),
+                                    Err(_) => {
+                                        // Use default value if provided, otherwise error
+                                        if let Some(default) = default_value {
+                                            result.push(default.clone());
+                                        } else {
+                                            return Err(BfErr::Code(E_RANGE));
+                                        }
+                                    }
+                                }
+                            },
+                            _ => return Err(BfErr::Code(E_TYPE)),
+                        }
+                    }
+                    
+                    Ok(Ret(v_list(&result)))
+                },
+                
+                _ => Err(BfErr::Code(E_TYPE)),
+            }
+        },
+        
+        // If the collection is a map, we don't support this yet
+        Variant::Map(_) => {
+            Err(BfErr::Code(E_TYPE))
+        },
+        
+        _ => Err(BfErr::Code(E_TYPE)),
+    }
+}
+bf_declare!(slice, bf_slice);
+
 fn load_server_options(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     if !bf_args.args.is_empty() {
         return Err(BfErr::Code(E_ARGS));
@@ -1324,6 +1468,7 @@ pub(crate) fn register_bf_server(builtins: &mut [Box<dyn BuiltinFunction>]) {
     builtins[offset_for_builtin("load_server_options")] = Box::new(BfLoadServerOptions {});
     builtins[offset_for_builtin("encode_base64")] = Box::new(BfEncodeBase64 {});
     builtins[offset_for_builtin("decode_base64")] = Box::new(BfDecodeBase64 {});
+    builtins[offset_for_builtin("slice")] = Box::new(BfSlice {});
 
     builtins[offset_for_builtin("present")] = Box::new(BfPresent {});
 }
