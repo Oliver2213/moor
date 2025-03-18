@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 
+
 members = [
     "crates/var",
     "crates/common",
@@ -109,6 +110,8 @@ strum = { version = "0.26", features = ["derive"] }
 ustr = "1.0"
 uuid = { version = "1.11", features = ["v4"] }
 xml-rs = "0.8"
+iftree = "1.0"
+
 
 ## Required for MOO builtins.
 argon2 = "0.5"

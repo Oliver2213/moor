@@ -45,9 +45,8 @@ serde_derive.workspace = true
 serde_json.workspace = true
 tower-http.workspace = true
 
-#
-rolldown = { git = "https://github.com/rolldown/rolldown" }
+# For embedding assets
+iftree = "1.0"
 
 [build-dependencies]
-rolldown = { git = "https://github.com/rolldown/rolldown" }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "rt-multi-thread"] }

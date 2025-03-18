@@ -12,8 +12,10 @@
 //
 
 mod host;
+mod assets;
 
 use crate::host::WebHost;
+use crate::assets::ClientAsset;
 use std::collections::HashMap;
 
 use axum::Router;
@@ -25,12 +27,7 @@ use axum::extract::State;
 use axum::handler::HandlerWithoutStateExt;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use futures_util::future::OptionFuture;
 use moor_var::{Obj, SYSTEM_OBJECT};
-use rolldown::{
-    Bundler, BundlerOptions, ExperimentalOptions, InputItem, OutputFormat, Platform,
-    RawMinifyOptions, SourceMapType, Watcher,
-};
 use rpc_async_client::{
     ListenersClient, ListenersMessage, make_host_token, proces_hosts_events, start_host_session,
 };
@@ -60,30 +57,7 @@ struct Args {
     )]
     listen_address: String,
 
-    #[arg(
-        long,
-        value_name = "dist-directory",
-        help = "Directory to serve static files from, and to compile/bundle them to",
-        default_value = "./dist"
-    )]
-    dist_directory: PathBuf,
-
-    #[arg(
-        long,
-        value_name = "watch-changes",
-        help = "Watch for changes in the dist directory and recompile (for development)",
-        default_value = "false"
-    )]
-    watch_changes: bool,
-
-    // Where to find the client source files for the web bundler
-    #[arg(
-        long,
-        value_name = "client-sources",
-        help = "Directory for HTML/JS/CSS client source files for serving and compilation",
-        default_value = "./crates/web-host/src/client"
-    )]
-    client_sources: PathBuf,
+    // We no longer need these arguments as assets are embedded in the binary
 
     #[arg(long, help = "Enable debug logging", default_value = "false")]
     pub debug: bool,
@@ -95,8 +69,6 @@ struct Listeners {
     rpc_address: String,
     events_address: String,
     kill_switch: Arc<AtomicBool>,
-    src_dir: PathBuf,
-    dist_dir: PathBuf,
 }
 
 impl Listeners {
@@ -105,8 +77,6 @@ impl Listeners {
         rpc_address: String,
         events_address: String,
         kill_switch: Arc<AtomicBool>,
-        src_dir: PathBuf,
-        dist_dir: PathBuf,
     ) -> (
         Self,
         tokio::sync::mpsc::Receiver<ListenersMessage>,
@@ -119,8 +89,6 @@ impl Listeners {
             rpc_address,
             events_address,
             kill_switch,
-            src_dir,
-            dist_dir,
         };
         let listeners_client = ListenersClient::new(tx);
         (listeners, rx, listeners_client)
@@ -143,12 +111,11 @@ impl Listeners {
             match listeners_channel.recv().await {
                 Some(ListenersMessage::AddListener(handler, addr)) => {
                     let ws_host = WebHost::new(
-                        self.src_dir.clone(),
                         self.rpc_address.clone(),
                         self.events_address.clone(),
                         handler.clone(),
                     );
-                    let main_router = match mk_routes(ws_host, &self.dist_dir) {
+                    let main_router = match mk_routes(ws_host, Path::new(".")) {
                         Ok(mr) => mr,
                         Err(e) => {
                             warn!(?e, "Unable to create main router");
@@ -228,48 +195,72 @@ impl Listener {
     }
 }
 
-async fn index_handler(State(state): State<WebHost>) -> impl IntoResponse {
+async fn index_handler(_state: State<WebHost>) -> impl IntoResponse {
     let mut headers = header::HeaderMap::new();
-    // Read the index.html file out of state.root_path
-    let Ok(index_html) = std::fs::read_to_string(state.root_path.join("index.html")) else {
-        return (
-            StatusCode::NOT_FOUND,
-            headers,
-            "Unable to read index.html".to_string(),
-        );
-    };
+    
+    // Get the index.html from embedded assets
+    let index_asset = assets::ClientAsset::find("index.html").unwrap_or_else(|| {
+        // This should never happen in production as assets are embedded
+        panic!("index.html not found in embedded assets");
+    });
+    
     // Return with content-type html
     headers.insert(
         header::CONTENT_TYPE,
-        header::HeaderValue::from_static("text/html"),
+        header::HeaderValue::from_static(index_asset.content_type()),
     );
-    (StatusCode::OK, headers, index_html)
+    
+    // In debug builds this will read from disk, in release it uses the embedded version
+    let content = (index_asset.get_str)();
+    (StatusCode::OK, headers, content.into_owned())
 }
 
-async fn css_handler(State(state): State<WebHost>) -> impl IntoResponse {
+async fn css_handler(_state: State<WebHost>) -> impl IntoResponse {
     let mut headers = header::HeaderMap::new();
-    let Ok(css) = std::fs::read_to_string(state.root_path.join("moor.css")) else {
-        return (
-            StatusCode::NOT_FOUND,
-            headers,
-            "Unable to read moor.css".to_string(),
-        );
-    };
+    
+    // Get the CSS from embedded assets
+    let css_asset = assets::ClientAsset::find("moor.css").unwrap_or_else(|| {
+        // This should never happen in production as assets are embedded
+        panic!("moor.css not found in embedded assets");
+    });
+    
     // Return with content-type css
     headers.insert(
         header::CONTENT_TYPE,
-        header::HeaderValue::from_static("text/css"),
+        header::HeaderValue::from_static(css_asset.content_type()),
     );
-    (StatusCode::OK, headers, css)
+    
+    // In debug builds this will read from disk, in release it uses the embedded version
+    let content = (css_asset.get_str)();
+    (StatusCode::OK, headers, content.into_owned())
 }
 
-fn mk_routes(web_host: WebHost, dist_dir: &Path) -> eyre::Result<Router> {
-    async fn handle_404() -> (StatusCode, &'static str) {
-        (StatusCode::NOT_FOUND, "Not found")
+// Add a static file handler for embedded assets
+async fn static_file_handler(axum::extract::Path(path): axum::extract::Path<String>) -> impl IntoResponse {
+    let mut headers = header::HeaderMap::new();
+    
+    // Find the asset by path
+    if let Some(asset) = assets::ClientAsset::find(&path) {
+        // Set the content type based on file extension
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static(asset.content_type()),
+        );
+        
+        // In debug builds this will read from disk, in release it uses the embedded version
+        let content = (asset.get_bytes)();
+        (StatusCode::OK, headers, content.into_owned())
+    } else {
+        // Asset not found
+        headers.insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/plain"),
+        );
+        (StatusCode::NOT_FOUND, headers, Vec::new())
     }
+}
 
-    let dist_service = ServeDir::new(dist_dir).not_found_service(handle_404.into_service());
-
+fn mk_routes(web_host: WebHost, _dist_dir: &Path) -> eyre::Result<Router> {
     let webhost_router = Router::new()
         .route("/", get(index_handler))
         .route("/moor.css", get(css_handler))
@@ -295,46 +286,15 @@ fn mk_routes(web_host: WebHost, dist_dir: &Path) -> eyre::Result<Router> {
             "/properties/{object}/{name}",
             get(host::property_retrieval_handler),
         )
-        .fallback_service(dist_service)
+        // Add a catch-all route for static files from embedded assets
+        .route("/static/*path", get(static_file_handler))
+        .fallback(static_file_handler)
         .with_state(web_host);
 
     Ok(webhost_router)
 }
 
-fn mk_js_bundler(src_dir: &Path) -> Arc<Mutex<Bundler>> {
-    // Find all .ts files in the src directory
-    // moor.ts is always first
-    let mut input = vec![src_dir.join("moor.ts").to_string_lossy().to_string().into()];
-
-    for entry in std::fs::read_dir(src_dir).expect("Unable to read src directory") {
-        let entry = entry.expect("Unable to read entry");
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "ts") {
-            if path.file_name().is_some_and(|name| name == "moor.ts") {
-                continue;
-            }
-            input.push(InputItem {
-                import: path.to_string_lossy().to_string(),
-                ..Default::default()
-            });
-        }
-    }
-
-    let bundler = Bundler::new(BundlerOptions {
-        input: Some(input),
-        sourcemap: Some(SourceMapType::File),
-        minify: Some(RawMinifyOptions::Bool(false)),
-        format: Some(OutputFormat::Esm),
-        platform: Some(Platform::Browser),
-        experimental: Some(ExperimentalOptions {
-            incremental_build: Some(true),
-            ..Default::default()
-        }),
-
-        ..Default::default()
-    });
-    Arc::new(Mutex::new(bundler))
-}
+// We no longer need the JS bundler as assets are embedded
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), eyre::Error> {
@@ -375,8 +335,6 @@ async fn main() -> Result<(), eyre::Error> {
         args.client_args.rpc_address.clone(),
         args.client_args.events_address.clone(),
         kill_switch.clone(),
-        args.client_sources.to_owned(),
-        args.dist_directory.to_owned(),
     );
     let listeners_thread = tokio::spawn(async move {
         listeners_server.run(listeners_channel).await;
@@ -409,37 +367,8 @@ async fn main() -> Result<(), eyre::Error> {
         HostType::TCP,
     );
 
-    let bundler = mk_js_bundler(&args.client_sources);
-
-    // Delete any pre-existing content in the dist dir.
-    if args.dist_directory.exists() {
-        std::fs::remove_dir_all(&args.dist_directory)
-            .expect("Unable to remove existing dist directory");
-    }
-
-    // Write initial bundle
-    if let Err(e) = bundler.lock().await.write().await {
-        warn!(?e, "Unable to write initial bundle");
-        for msg in e.iter() {
-            warn!("{:?}", msg);
-        }
-        panic!("Unable to write initial bundle");
-    }
-    info!("Bundle written to {:?}", args.dist_directory);
-
-    // Start watching for changes, if such a thing is desired
-    let _watcher_future: OptionFuture<_> = args
-        .watch_changes
-        .then(|| {
-            let bundler = bundler.clone();
-            let dist_dir = args.dist_directory.clone();
-            tokio::spawn(async move {
-                let watcher = Watcher::new(vec![bundler], None).unwrap();
-                info!("Watching {:?} for changes...", dist_dir);
-                watcher.start().await
-            })
-        })
-        .into();
+    // Assets are now embedded in the binary, no need for bundling at runtime
+    info!("Using embedded assets for web client");
 
     select! {
         _ = host_listen_loop => {
