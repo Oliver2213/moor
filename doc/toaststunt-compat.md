@@ -4,6 +4,7 @@ This document lists Moor's current state of toaststunt and stunt compatibility.
 ## Complete
 * ftime(), with ftime(1) returning a monotonic floating-point.
 * listen(): done upstream, needs testing. Likely not using toaststunt's arguments, listen-tls, etc.
+* slice()
 
 ## keywords / errors:
 * E_FILE
@@ -20,7 +21,7 @@ This document lists Moor's current state of toaststunt and stunt compatibility.
 * encode_binary(), decode_binary()
 * object hierarchy "improvements": multiple inheritance, ancestors(), descendants(), parents(), chparents(), isa()
   * investigate existing relational support
-* slice(), explode(), sort()
+* explode(), sort()
 * think about read_http - is it necesary? what about the MOO web server; rust http routing framework hooked into moo?
 
 
