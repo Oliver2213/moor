@@ -118,6 +118,8 @@ For JSON serialization (in `crates/web-host/src/host/mod.rs`):
 - Update `var_as_json` to handle your new type
 - Update `json_as_var` to parse your type from JSON
 
+Update `moo_value_to_json` in `crates/kernel/src/builtins/bf_strings.rs`, so your value works with the generate and parse json builtins. (until we make this a utility)
+
 ### 5. Add JavaScript/TypeScript Support
 
 Update the TypeScript definitions in `crates/web-host/src/client/var.ts`:
@@ -177,8 +179,10 @@ pub fn v_empty_set() -> Var {
 If your datatype needs to be accessible from MOO code:
 
 1. Add built-in functions for creating and manipulating your type
-2. Update the parser to recognize literal syntax for your type (if applicable)
-3. Implement any special verbs or properties needed for your type
+2. Update the parser to recognize literal syntax for your type (if applicable): `crates/compiler/src/{moo.pest[, ast.rs]} for ast nodes if a non-atomic type; {unparse.rs, decompile.rs} for vm opcodes, `parse.rs` if you need to add a new compiler option.
+3. Update the `bf_toliteral` function in `crates/kernel/src/builtins/bf_values.rs` so `toliterall(value_of_your_type)` in MOO returns something meaningful. Its probably best if this is exactly as your literal representation looks if you can manage it.
+4. Implement any special verbs or properties needed for your type
+5. 
 
 ## Example: Adding a "Duration" Type
 
