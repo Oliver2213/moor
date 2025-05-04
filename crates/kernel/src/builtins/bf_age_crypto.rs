@@ -145,14 +145,14 @@ fn bf_age_encrypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
     }
 
     // Create an encryptor with the recipients
-    let encryptor = Encryptor::with_recipients(recipients).ok_or_else(|| {
-        error!("Failed to create encryptor");
-        BfErr::Code(E_INVARG)
-    })?;
+    let encryptor = Encryptor::with_recipients(recipients.iter().map(|r| r.as_ref() as &dyn age::Recipient));
 
     // Encrypt the message
     let mut encrypted = Vec::new();
-    let mut writer = match encryptor.wrap_output(&mut encrypted) {
+    let mut writer = match encryptor.map_err(|e| {
+        error!("Failed to create encryptor: {}", e);
+        BfErr::Code(E_INVARG)
+    })?.wrap_output(&mut encrypted) {
         Ok(writer) => writer,
         Err(e) => {
             error!("Failed to create encryption writer: {}", e);
@@ -280,11 +280,10 @@ fn bf_age_decrypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 
     // Create a decryptor
     let decryptor = match Decryptor::new(&encrypted[..]) {
-        Ok(Decryptor::Recipients(d)) => d,
-        Ok(_) => {
-            warn!("Unsupported decryptor type (expected recipient-based)");
-            return Err(BfErr::Code(E_INVARG));
-        }
+        Ok(d) => {
+            // In age 0.11.x, we need to use the decryptor directly
+            d
+        },
         Err(e) => {
             error!("Failed to create decryptor: {}", e);
             return Err(BfErr::Code(E_INVARG));
@@ -293,7 +292,7 @@ fn bf_age_decrypt(bf_args: &mut BfCallState<'_>) -> Result<BfRet, BfErr> {
 
     // Attempt decryption
     let mut decrypted = Vec::new();
-    match decryptor.decrypt(identities.iter().map(|i| i.as_ref() as &dyn age::Identity)) {
+    match decryptor.decrypt(identities.iter().map(|i| i.as_ref())) {
         Ok(mut reader) => {
             if let Err(e) = std::io::Read::read_to_end(&mut reader, &mut decrypted) {
                 error!("Failed to read decrypted data: {}", e);
